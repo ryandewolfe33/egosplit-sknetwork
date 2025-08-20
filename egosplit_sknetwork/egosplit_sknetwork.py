@@ -1,0 +1,170 @@
+import sknetwork as sn
+import numpy as np
+import scipy.sparse as sp
+import numba
+from numba.typed import List
+
+
+class ConnectedComponents(sn.clustering.BaseClustering):
+    """
+    A helper class that makes allows connected components to behave like a clustering algorithm.
+    The clusters are the connected components of the input graph
+    """
+    def __init__(
+            self,
+            sort_clusters:bool=True,
+            return_probs:bool=False,
+            return_aggregate:bool=False
+    ):
+        super(ConnectedComponents, self).__init__(sort_clusters=sort_clusters, return_probs=return_probs, return_aggregate=return_aggregate)
+
+
+    def fit(self, g):
+        self.labels_ = sp.csgraph.connected_components(g)[1]
+        return self
+
+
+#################################
+# Helper Functions for EgoSplit #
+#################################
+
+@numba.njit
+def make_persona_graph(g_indptr, g_indices, g_data, egonet_indices, egonet_community, first_personae_index):
+    persona_indptr = np.empty(first_personae_index[-1]+1, dtype="int32")
+    persona_indptr[-1] = len(g_indices)
+    persona_indices = np.empty_like(g_indices)
+    persona_data = np.empty_like(g_data)
+    next_index = 0
+
+    for og_n1 in range(len(g_indptr)-1):
+        og_neighbors = egonet_indices[og_n1]
+        communities = egonet_community[og_n1]
+
+        for c in range(np.max(communities)+1):
+            new_n1 = first_personae_index[og_n1] + c
+            new_n1_indptr = next_index
+            persona_indptr[new_n1] = new_n1_indptr
+            for i in range(len(communities)):
+                if communities[i] != c:
+                    continue
+                og_n2 = og_neighbors[i]
+                # Get new id of the other end of the edge (og_n1, og_n2)
+                og_n2_neighbors = egonet_indices[og_n2]
+                # search for og_n1
+                for j in range(len(og_n2_neighbors)):
+                    if og_n2_neighbors[j] != og_n1:
+                        continue
+                    # Get the egonet commuity of og_n1
+                    n2_persona_for_n1 = egonet_community[og_n2][j]
+                    new_n2 = first_personae_index[og_n2] + n2_persona_for_n1
+                    # write new n2_persona and data into persona graph
+                    persona_indices[next_index] = new_n2
+                    persona_data[next_index] = g_data[g_indptr[og_n1]] + i
+                    next_index += 1
+    return persona_data, persona_indices, persona_indptr
+
+
+@numba.njit
+def get_nodes_in_cluster(persona_clusters, first_personae_index, c):
+    personas = np.nonzero(persona_clusters == c)[0]
+    node_ids = np.empty(len(personas), dtype="int32")
+    for i, persona in enumerate(personas):
+        node_id = np.searchsorted(first_personae_index, persona, side="right") - 1
+        node_ids[i] = node_id
+    return node_ids
+
+
+class EgoSplit:
+    """
+    Implementation of the Egosplitting framework method for overlapping clustering using
+    sknetwork. Since sknetwork does not allow overlapping clusterings, this is not a 
+    subclass of the sknetwork.clustering.BaseClustering, but it is built to behave similarly. 
+
+    Parameters
+    ---------- 
+    local_clustering: The clustering method used for the egonet. Should be either "CC"
+        (ConnectedCompnents), "PC" (PropagationClustering), or a subclass of 
+        sknetwork.clustering.BaseClustering.
+    global_clustering: THe clustering method used for the persona graph. Should
+        be either "Louvain", "Leiden", or a subclass of sknetwork.clustering.BaseClustering.
+    random_state: The random state to pass to the default clustering algorithms
+      
+    Returns
+    -------
+    scipy.sparse.csr_matrix: An overlapping clustering of the nodes. Rows correspond to cluters and columns to nodes.
+    
+    Example
+    -------
+    >>> g = sn.data.karate_club()
+    >>> part1 = EgoSplit().fit_predict(g)
+    
+    Reference
+    ---------
+    Alessandro Epasto, Silvio Lattanzi, and Renato Paes Leme. 2017. Ego-Splitting Framework: from Non-Overlapping
+    to Overlapping Clusters. In Proceedings of the 23rd ACM SIGKDD International Conference on Knowledge Discovery
+    and Data Mining (KDD '17). Association for Computing Machinery, New York, NY, USA, 145-154.
+    https://doi.org/10.1145/3097983.3098054
+    """
+    def __init__(self, local_clustering="CC", global_clustering="Louvain", random_state=None):
+        if local_clustering == "CC":
+            self.local_clustering_ = ConnectedComponents()
+        elif local_clustering == "PC":
+            self.local_clustering_ = sn.clustering.PropagationClustering()
+        elif issubclass(type(local_clustering), sn.clustering.BaseClustering):
+            self.local_clustering_ = local_clustring
+        else:
+            raise ValueError(f"local_clustering should be either 'CC' or 'PC', or a subclass of sknetwork.clustering.BaseClustering. Got {type(local_clustering)}")
+
+        if global_clustering == "Louvain":
+            self.global_clustering_ = sn.clustering.Louvain(random_state=random_state)
+        elif global_clustering == "Leiden":
+            self.global_clustering_ = sn.clustering.Leiden(random_state=random_state)
+        elif global_clustering == "PC":
+            self.global_clustering_ = sn.clustering.PropagationClustering()
+        elif issubclass(type(global_clustering), sn.clustering.BaseClustering):
+            self.global_clustering_ = global_clustering
+        else:
+            raise valueError(f"global_clustering should be in ['Louvain', 'Leiden', 'PC'] or a subclass of sknetwork.clustering.BaseClustering. Got {type(global_clustering)}")
+
+
+    def fit(self, g):
+        egonets = []  # Store a sparse matrix of the egonet of node i 
+        egonet_indices = []  # Store the original indices of the egonet
+        for node in range(g.shape[0]):
+            neighbors = g[node].indices
+            egonet_indices.append(neighbors)
+            egonets.append(g[neighbors][:, neighbors])
+
+        egonet_community = []  # Store the community labels of the ego nets
+        self.first_personae_index_ = np.empty(g.shape[0]+1, dtype="int32")  # Store the first index for a nodes new personae.
+        #The new personae of node i will be store in rows first_personae_index[i], first_personae_index[i]+1, ... , first_personae_index[i+1]-1.
+        next_index = 0
+        for node in range(g.shape[0]):
+            if len(egonets[node].data) == 0: # egonet has no edges, each node is its own cluster
+                persona_map = sp.csgraph.connected_components(egonets[node])[1]
+            else:
+                persona_map = self.local_clustering_.fit_predict(egonets[node]).astype("int32")
+            egonet_community.append(persona_map)
+            self.first_personae_index_[node] = next_index
+            next_index += np.max(persona_map) + 1
+        self.first_personae_index_[-1] = next_index
+
+        ei = List(egonet_indices)
+        ec = List(egonet_community)
+
+        persona_graph_data = make_persona_graph(g.indptr, g.indices, g.data, ei, ec, self.first_personae_index_)
+        self.persona_graph_ = sp.csr_matrix(persona_graph_data, shape=(self.first_personae_index_[-1],self.first_personae_index_[-1]))
+        self.persona_clusters_ = self.global_clustering_.fit_predict(self.persona_graph_)
+
+        n_clusters = np.max(self.persona_clusters_)+1
+        clusters = sp.lil_matrix((n_clusters, g.shape[0]), dtype="bool")
+        for c in range(n_clusters):
+            nodes_in_cluster = get_nodes_in_cluster(self.persona_clusters_, self.first_personae_index_, c)
+            clusters[c, nodes_in_cluster] = True
+        self.labels_ = clusters.tocsr()
+        return self
+
+    
+    def fit_predict(self, g):
+        self.fit(g)
+        return self.labels_

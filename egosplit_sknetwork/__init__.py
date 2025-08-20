@@ -1,0 +1,1 @@
+from .egosplit_sknetwork import EgoSplit
