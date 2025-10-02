@@ -115,7 +115,11 @@ class EgoSplit:
     """
 
     def __init__(
-        self, local_clustering="CC", global_clustering="Louvain", random_state=None
+        self,
+        local_clustering="CC",
+        global_clustering="Louvain",
+        min_cluster_size=5,
+        random_state=None,
     ):
         if local_clustering == "CC":
             self.local_clustering_ = ConnectedComponents()
@@ -140,6 +144,18 @@ class EgoSplit:
             raise valueError(
                 f"global_clustering should be in ['Louvain', 'Leiden', 'PC'] or a subclass of sknetwork.clustering.BaseClustering. Got {type(global_clustering)}"
             )
+
+        self.min_cluster_size = min_cluster_size
+        if not isinstance(self.min_cluster_size, int):
+            if self.max_rounds % 1 != 0:
+                raise ValueError("min_cluster_size must be a whole number")
+            try:
+                # convert other types of int to python int
+                self.min_cluster_size = int(self.min_cluster_size)
+            except ValueError:
+                raise ValueError("min_cluster_size must be an int")
+        if self.min_cluster_size < 0:
+            raise ValueError("min_cluster_size must be non-negative")
 
     def fit(self, g):
         egonets = []  # Store a sparse matrix of the egonet of node i
@@ -191,6 +207,10 @@ class EgoSplit:
                 self.persona_clusters_, self.first_personae_index_, c
             )
             clusters[c, nodes_in_cluster] = True
+
+        if self.min_cluster_size > 0:
+            clusters = clusters[clusters.getnnz(1) >= self.min_cluster_size]
+
         self.labels_ = clusters.tocsr()
         return self
 
