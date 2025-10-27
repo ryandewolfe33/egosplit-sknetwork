@@ -3,6 +3,7 @@ import numpy as np
 import scipy.sparse as sp
 import numba
 from numba.typed import List
+from tqdm import tqdm
 
 
 class ConnectedComponents(sn.clustering.BaseClustering):
@@ -71,16 +72,6 @@ def make_persona_graph(
     return persona_data, persona_indices, persona_indptr
 
 
-@numba.njit
-def get_nodes_in_cluster(persona_clusters, first_personae_index, c):
-    personas = np.nonzero(persona_clusters == c)[0]
-    node_ids = np.empty(len(personas), dtype="int32")
-    for i, persona in enumerate(personas):
-        node_id = np.searchsorted(first_personae_index, persona, side="right") - 1
-        node_ids[i] = node_id
-    return node_ids
-
-
 class EgoSplit:
     """
     Implementation of the Egosplitting framework method for overlapping clustering using
@@ -120,6 +111,7 @@ class EgoSplit:
         global_clustering="Louvain",
         min_cluster_size=5,
         random_state=None,
+        verbose=False,
     ):
         if local_clustering == "CC":
             self.local_clustering_ = ConnectedComponents()
@@ -156,15 +148,10 @@ class EgoSplit:
                 raise ValueError("min_cluster_size must be an int")
         if self.min_cluster_size < 0:
             raise ValueError("min_cluster_size must be non-negative")
+        self.verbose = verbose
 
     def fit(self, g):
-        egonets = []  # Store a sparse matrix of the egonet of node i
         egonet_indices = []  # Store the original indices of the egonet
-        for node in range(g.shape[0]):
-            neighbors = g[node].indices
-            egonet_indices.append(neighbors)
-            egonets.append(g[neighbors][:, neighbors])
-
         egonet_community = []  # Store the community labels of the ego nets
         self.first_personae_index_ = np.empty(
             g.shape[0] + 1, dtype="int32"
@@ -172,23 +159,25 @@ class EgoSplit:
         # The new personae of node i will be stored in rows
         # first_personae_index[i], first_personae_index[i]+1, ... , first_personae_index[i+1]-1.
         next_index = 0
-        for node in range(g.shape[0]):
+        print("Making Egonets") if self.verbose else None
+        for node in tqdm(range(g.shape[0]), disable=not self.verbose):
+            neighbors = g.indices[g.indptr[node] : g.indptr[node + 1]]
+            egonet_indices.append(neighbors)
+            egonet = g[neighbors][:, neighbors]
             if (
-                len(egonets[node].data) == 0
+                len(egonet.data) == 0
             ):  # egonet has no edges, each node is its own cluster
-                persona_map = sp.csgraph.connected_components(egonets[node])[1]
+                persona_map = sp.csgraph.connected_components(egonet)[1]
             else:
-                persona_map = self.local_clustering_.fit_predict(egonets[node]).astype(
-                    "int32"
-                )
+                persona_map = self.local_clustering_.fit_predict(egonet).astype("int32")
             egonet_community.append(persona_map)
             self.first_personae_index_[node] = next_index
             next_index += np.max(persona_map) + 1
-        self.first_personae_index_[-1] = next_index
 
+        self.first_personae_index_[-1] = next_index
         ei = List(egonet_indices)
         ec = List(egonet_community)
-
+        print("Making Persona Graph") if self.verbose else None
         persona_graph_data = make_persona_graph(
             g.indptr, g.indices, g.data, ei, ec, self.first_personae_index_
         )
@@ -196,18 +185,23 @@ class EgoSplit:
             persona_graph_data,
             shape=(self.first_personae_index_[-1], self.first_personae_index_[-1]),
         )
+        print("Clustering Persona Graph") if self.verbose else None
         self.persona_clusters_ = self.global_clustering_.fit_predict(
             self.persona_graph_
         )
-
+        print("Mapping Clusters") if self.verbose else None
         n_clusters = np.max(self.persona_clusters_) + 1
-        clusters = sp.lil_matrix((n_clusters, g.shape[0]), dtype="bool")
-        for c in range(n_clusters):
-            nodes_in_cluster = get_nodes_in_cluster(
-                self.persona_clusters_, self.first_personae_index_, c
+        clusters = sp.lil_matrix((g.shape[0], n_clusters), dtype="bool")
+        for node in tqdm(range(g.shape[0]), disable=not self.verbose):
+            node_clusters = np.unique(
+                self.persona_clusters_[
+                    self.first_personae_index_[node] : self.first_personae_index_[
+                        node + 1
+                    ]
+                ]
             )
-            clusters[c, nodes_in_cluster] = True
-
+            clusters[node, node_clusters] = True
+        clusters = clusters.tocsc().transpose()
         if self.min_cluster_size > 0:
             clusters = clusters[clusters.getnnz(1) >= self.min_cluster_size]
 
