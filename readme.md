@@ -28,9 +28,9 @@ egosplit = EgoSplit()
 labels = egosplit.fit_predict(g)
 ```
 
-By default the algorihtms uses connected components for clustering the ego-net and Louvain for global clustering.
+By default the algorithm uses [Propagation Clustering](https://scikit-network.readthedocs.io/en/latest/reference/clustering.html#sknetwork.clustering.PropagationClustering) for local clustering and [Leiden](https://scikit-network.readthedocs.io/en/latest/reference/clustering.html#sknetwork.clustering.Leiden) for global clustering.
 To pass other clustering algorithms to egosplit, they must be initialized in advace and passed as parameters.
-The algorithm accepts any subclass of [sknetwork.clustering.BaseClustering](https://scikit-network.readthedocs.io/en/latest/reference/clustering.html) for either local_clustering (used to cluster the egonets) or the global_clustering (use to cluster the persona graph).
+The algorithm accepts any subclass of [sknetwork.clustering.BaseClustering](https://scikit-network.readthedocs.io/en/latest/reference/clustering.html) for either local_clustering (used to cluster the egonets) or global_clustering (used to cluster the persona graph).
 
 ```python
 high_res_clusterer = sn.clustering.Louvain(resolution=5, random_state=42)

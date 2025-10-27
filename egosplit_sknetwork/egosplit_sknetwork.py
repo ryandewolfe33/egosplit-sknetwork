@@ -107,8 +107,8 @@ class EgoSplit:
 
     def __init__(
         self,
-        local_clustering="CC",
-        global_clustering="Louvain",
+        local_clustering="PC",
+        global_clustering="Leiden",
         min_cluster_size=5,
         random_state=None,
         verbose=False,
@@ -124,10 +124,10 @@ class EgoSplit:
                 f"local_clustering should be either 'CC' or 'PC', or a subclass of sknetwork.clustering.BaseClustering. Got {type(local_clustering)}"
             )
 
-        if global_clustering == "Louvain":
-            self.global_clustering_ = sn.clustering.Louvain(random_state=random_state)
-        elif global_clustering == "Leiden":
+        if global_clustering == "Leiden":
             self.global_clustering_ = sn.clustering.Leiden(random_state=random_state)
+        elif global_clustering == "Louvain":
+            self.global_clustering_ = sn.clustering.Louvain(random_state=random_state)
         elif global_clustering == "PC":
             self.global_clustering_ = sn.clustering.PropagationClustering()
         elif issubclass(type(global_clustering), sn.clustering.BaseClustering):
@@ -205,7 +205,7 @@ class EgoSplit:
         if self.min_cluster_size > 0:
             clusters = clusters[clusters.getnnz(1) >= self.min_cluster_size]
 
-        self.labels_ = clusters.tocsr()
+        self.labels_ = clusters
         return self
 
     def fit_predict(self, g):
